@@ -66,3 +66,5 @@ differences in vector magnitude between texts of different lengths.
 
 See `CAVEATS.md` for known limitations and things to watch out for
 before using this as anything more than a demo.
+
+Next lesson: MultiModal AI: Talking to Agents -> https://gist.github.com/MightContainNuts/c4c7bd2c3b3e7848b282d2e228a87be8
