@@ -64,5 +64,5 @@ plain dot product — cheaper to compute, and it means differences in
 score reflect *direction* (semantic content) rather than incidental
 differences in vector magnitude between texts of different lengths.
 
-See `GOTCHAS.md` for known limitations and things to watch out for
+See `CAVEATS.md` for known limitations and things to watch out for
 before using this as anything more than a demo.

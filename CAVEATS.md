@@ -1,4 +1,4 @@
-# Gotchas & Limitations
+# Caveats & Limitations
 
 This is a **teaching demo**, not a production pipeline. Known issues
 and things to fix before using it for anything real:
