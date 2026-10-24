@@ -1,3 +1,7 @@
+[![GitHub stars](https://img.shields.io/github/stars/suvrazastrovision/multimodal_rag?style=flat)](https://github.com/suvrazastrovision/multimodal_rag/stargazers)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![Python 3.13](https://img.shields.io/badge/Python-3.13-blue.svg)](https://www.python.org/downloads/release/python-3130/)
+
 # Mount Everest Soundpiece
 
 Transcribe a Mount Everest audio recording and generate a concise, transcript-grounded summary.
