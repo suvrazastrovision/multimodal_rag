@@ -1,13 +1,12 @@
 """
-Support call pipeline demo.
+Mount Everest soundpiece pipeline.
 
 Pipeline steps:
   1. Setup & verification    - check env vars, ffmpeg, input file
   2. Audio preprocessing     - convert to 16kHz mono WAV
   3. Transcription (ASR)     - speech-to-text via OpenAI
-  4. Retrieval (embeddings)  - find similar past calls
-  5. Response generation     - LLM answer grounded in transcript + retrieval
-  6. Text-to-speech (TTS)    - spoken output of the answer
+  4. Summary generation      - summarize the soundpiece and its themes
+  5. Text-to-speech (TTS)    - spoken output of the summary
 """
 
 from pathlib import Path
@@ -16,68 +15,60 @@ import re
 import shutil
 import subprocess
 
-import numpy as np
-import pandas as pd
 import librosa
 from dotenv import load_dotenv
-from sklearn.metrics.pairwise import cosine_similarity
 from IPython.display import Audio, display
 from openai import OpenAI
+
+load_dotenv()
 
 
 # --------------------------------------------------------------------------
 # Configuration
 # --------------------------------------------------------------------------
 
-INPUT_AUDIO = Path("sample_support_call.m4a")
+INPUT_AUDIO = Path("mount_everest.m4a")
 CLEAN_AUDIO = Path("clean_audio_16k_mono.wav")
-TTS_OUTPUT = Path("answer_openai.wav")
+TRANSCRIPT_OUTPUT = Path("mount_everest_transcript.txt")
+SUMMARY_OUTPUT = Path("mount_everest_summary.txt")
+TTS_OUTPUT = Path("mount_everest_summary.wav")
 
 STT_MODEL = os.getenv("OPENAI_STT_MODEL", "gpt-4o-transcribe")
-EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 ANSWER_MODEL = os.getenv("OPENAI_ANSWER_MODEL", "gpt-5-mini")
 TTS_MODEL = os.getenv("OPENAI_TTS_MODEL", "tts-1")
-TTS_VOICE = os.getenv("OPENAI_TTS_VOICE", "coral")
-
-FALLBACK_TRANSCRIPT = (
-    "Hi, I cannot log into my account. "
-    "The password reset email never arrives, and I need access today."
-)
-
-PAST_CALLS = [
-    {
-        "id": "call_101",
-        "topic": "billing",
-        "transcript": "The customer was charged twice for the same invoice and wants a refund.",
-    },
-    {
-        "id": "call_102",
-        "topic": "password_reset",
-        "transcript": "The user cannot log in because the password reset email is not arriving.",
-    },
-    {
-        "id": "call_103",
-        "topic": "delivery_delay",
-        "transcript": "The customer asks why their package is delayed and wants a new delivery date.",
-    },
-    {
-        "id": "call_104",
-        "topic": "audio_issue",
-        "transcript": "The microphone is not detected during video calls after a laptop update.",
-    },
-]
+TTS_VOICE = os.getenv("OPENAI_TTS_VOICE", "shimmer")
+GENERATE_SPOKEN_SUMMARY = os.getenv(
+    "GENERATE_SPOKEN_SUMMARY", "false"
+).lower() in {"1", "true", "yes"}
 
 
 # --------------------------------------------------------------------------
 # Step 1: Setup and verification
 # --------------------------------------------------------------------------
 
-def verify_environment(client: OpenAI) -> None:
+def verify_environment() -> None:
     """Check that required env vars, tooling, and input files are present."""
     print("OpenAI key set:", bool(os.environ.get("OPENAI_API_KEY")))
-    print("FFmpeg available:", bool(shutil.which("ffmpeg")))
+    print("FFmpeg available:", _find_ffmpeg() is not None)
     print("Input audio exists:", INPUT_AUDIO.exists())
     print("Answer model:", ANSWER_MODEL)
+
+
+def _find_ffmpeg() -> str | None:
+    """Find FFmpeg on PATH or in a standard Windows Winget installation."""
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg:
+        return ffmpeg
+
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        packages = Path(local_app_data) / "Microsoft" / "WinGet" / "Packages"
+        for package in sorted(packages.glob("Gyan.FFmpeg*")):
+            candidates = sorted(package.glob("**/bin/ffmpeg.exe"))
+            if candidates:
+                return str(candidates[0])
+
+    return None
 
 
 # --------------------------------------------------------------------------
@@ -86,8 +77,14 @@ def verify_environment(client: OpenAI) -> None:
 
 def preprocess_audio(input_path: Path, output_path: Path) -> None:
     """Convert input audio to 16kHz mono WAV using ffmpeg, then report stats."""
+    ffmpeg = _find_ffmpeg()
+    if ffmpeg is None:
+        raise FileNotFoundError(
+            "FFmpeg was not found. Install it and add it to PATH, then restart VS Code."
+        )
+
     cmd = [
-        "ffmpeg",
+        ffmpeg,
         "-y",
         "-i", str(input_path),
         "-ar", "16000",
@@ -117,17 +114,21 @@ def transcribe_audio(client: OpenAI, audio_path: Path) -> str:
         transcription = client.audio.transcriptions.create(
             model=STT_MODEL,
             file=audio_file,
-            prompt="A short customer support call",
+            prompt=(
+                "A Mount Everest soundpiece. Preserve names and terms such as "
+                "Everest, Khumbu, Himalaya, Sherpa, and summit when spoken."
+            ),
         )
     return transcription.text.strip()
 
 
 def get_transcript(client: OpenAI) -> str:
-    """Return a transcript: from audio if available, else the fallback text."""
+    """Preprocess and transcribe the supplied soundpiece."""
     if not INPUT_AUDIO.exists():
-        print("Missing", INPUT_AUDIO, "- using fallback transcript:")
-        print(FALLBACK_TRANSCRIPT)
-        return FALLBACK_TRANSCRIPT
+        raise FileNotFoundError(
+            f"Audio file not found: {INPUT_AUDIO}. "
+            "Set INPUT_AUDIO to the path of your Mount Everest soundpiece."
+        )
 
     preprocess_audio(INPUT_AUDIO, CLEAN_AUDIO)
     transcript = transcribe_audio(client, CLEAN_AUDIO)
@@ -136,62 +137,20 @@ def get_transcript(client: OpenAI) -> str:
 
 
 # --------------------------------------------------------------------------
-# Step 4: Retrieval (embeddings)
+# Step 4: Summary generation (LLM)
 # --------------------------------------------------------------------------
 
-def normalize_rows(matrix: np.ndarray) -> np.ndarray:
-    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
-    return matrix / np.clip(norms, 1e-12, None)
-
-
-def embed_texts(client: OpenAI, texts: list[str]) -> np.ndarray:
-    response = client.embeddings.create(
-        model=EMBEDDING_MODEL,
-        input=texts,
-    )
-    vectors = np.array([item.embedding for item in response.data], dtype=np.float32)
-    return normalize_rows(vectors)
-
-
-def retrieve_similar_calls(
-    client: OpenAI, transcript: str, past_calls: list[dict], top_k: int = 2
-) -> list[dict]:
-    """Embed the transcript and past calls, rank by cosine similarity."""
-    past_texts = [item["transcript"] for item in past_calls]
-
-    past_embeddings = embed_texts(client, past_texts)
-    query_embedding = embed_texts(client, [transcript])
-
-    scores = cosine_similarity(query_embedding, past_embeddings)[0]
-
-    results = pd.DataFrame({
-        "id": [item["id"] for item in past_calls],
-        "topic": [item["topic"] for item in past_calls],
-        "transcript": past_texts,
-        "score": scores,
-    }).sort_values("score", ascending=False)
-
-    print(results[["id", "topic", "score"]].to_string(index=False))
-
-    return results.head(top_k).to_dict(orient="records")
-
-
-# --------------------------------------------------------------------------
-# Step 5: Response generation (LLM)
-# --------------------------------------------------------------------------
-
-def generate_answer(client: OpenAI, transcript: str, retrieved_context: list[dict]) -> str:
-    """Ask the LLM to summarize, classify intent, and suggest a next action."""
+def generate_summary(client: OpenAI, transcript: str) -> str:
+    """Summarize the soundpiece and identify themes using its transcript."""
     user_prompt = (
-        "New call transcript:\n"
+        "Transcript of a Mount Everest soundpiece:\n"
         f"{transcript}\n\n"
-        "Similar past calls:\n"
-        f"{retrieved_context}\n\n"
         "Task:\n"
-        "1. Summarize the user issue in one sentence.\n"
-        "2. Identify the likely intent.\n"
-        "3. Suggest the next best support action.\n"
-        "Keep the answer short and clear."
+        "1. Give a concise summary of what the soundpiece communicates.\n"
+        "2. Identify its central themes and emotional tone.\n"
+        "3. Mention notable people, places, or events only if they appear "
+        "in the transcript.\n"
+        "Keep it clear and suitable as a short documentary-style narration."
     )
 
     response = client.responses.create(
@@ -200,22 +159,24 @@ def generate_answer(client: OpenAI, transcript: str, retrieved_context: list[dic
             {
                 "role": "developer",
                 "content": (
-                    "You are a concise support assistant. "
-                    "Use only the transcript and retrieved context. "
-                    "Do not invent account details, ticket IDs, or policies."
+                    "Your name is Suvra. You are an attentive and experienced nature photographer. Base your "
+                    "summary only on the supplied transcript. Do not invent "
+                    "audio details, historical facts, people, or events. "
+                    "A transcript cannot establish what music, ambience, or "
+                    "other nonverbal sounds are present."
                 ),
             },
             {"role": "user", "content": user_prompt},
         ],
     )
 
-    answer = response.output_text.strip()
-    print(answer)
-    return answer
+    summary = response.output_text.strip()
+    print(summary)
+    return summary
 
 
 # --------------------------------------------------------------------------
-# Step 6: Text-to-speech (TTS)
+# Step 5: Text-to-speech (TTS)
 # --------------------------------------------------------------------------
 
 def clean_for_tts(text: str) -> str:
@@ -225,7 +186,7 @@ def clean_for_tts(text: str) -> str:
 
 
 def synthesize_speech(client: OpenAI, text: str, output_path: Path) -> None:
-    """Convert text to spoken audio and save it to output_path."""
+    """Read the summary aloud and save it to output_path."""
     spoken_answer = clean_for_tts(text)
     print(spoken_answer)
 
@@ -233,7 +194,7 @@ def synthesize_speech(client: OpenAI, text: str, output_path: Path) -> None:
         model=TTS_MODEL,
         voice=TTS_VOICE,
         input=spoken_answer,
-        instructions="Speak clearly and calmly as a customer support assistant.",
+        instructions="Speak clearly and reflectively as a documentary narrator.",
         response_format="wav",
     ) as response:
         response.stream_to_file(output_path)
@@ -247,15 +208,20 @@ def synthesize_speech(client: OpenAI, text: str, output_path: Path) -> None:
 # --------------------------------------------------------------------------
 
 def main() -> None:
-    load_dotenv()
     client = OpenAI()
 
-    verify_environment(client)
+    verify_environment()
 
     transcript = get_transcript(client)
-    retrieved_context = retrieve_similar_calls(client, transcript, PAST_CALLS)
-    answer = generate_answer(client, transcript, retrieved_context)
-    synthesize_speech(client, answer, TTS_OUTPUT)
+    TRANSCRIPT_OUTPUT.write_text(transcript + "\n", encoding="utf-8")
+    print("Saved transcript to", TRANSCRIPT_OUTPUT)
+
+    summary = generate_summary(client, transcript)
+    SUMMARY_OUTPUT.write_text(summary + "\n", encoding="utf-8")
+    print("Saved summary to", SUMMARY_OUTPUT)
+
+    if GENERATE_SPOKEN_SUMMARY:
+        synthesize_speech(client, summary, TTS_OUTPUT)
 
 
 if __name__ == "__main__":

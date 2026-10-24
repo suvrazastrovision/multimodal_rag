@@ -1,0 +1,10 @@
+.env
+.venv/
+__pycache__/
+clean_audio_16k_mono.wav
+answer_openai.wav
+mount_everest_summary.wav
+mount_everest_transcript.txt
+mount_everest_summary.txt
+MultiModal_AI_Speech_to_Text_Text_to_Speech.md
+MultiModal_AI_Speech_to_Text_Text_to_Speech_Caveats.md

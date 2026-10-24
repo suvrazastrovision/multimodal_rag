@@ -1,0 +1,4 @@
+openai
+librosa
+python-dotenv
+ipython
